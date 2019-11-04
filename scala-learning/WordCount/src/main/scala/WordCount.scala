@@ -6,7 +6,7 @@ import org.apache.spark.{SparkConf, SparkContext}
 
 object WordCount {
   def main(args: Array[String]) {
-    val inputFile =  "/Users/gzzhangqilong2017/Workspace/github/spark-and-scala-learning/scala-learning/src/main/resources/word.txt"
+    val inputFile =  "/Users/gzzhangqilong2017/Workspace/github/spark-and-scala-learning/scala-learning/WordCount/src/main/resources/word.txt"
     val conf = new SparkConf().setAppName("WordCount").setMaster("local")
     val sc = new SparkContext(conf)
     val textFile = sc.textFile(inputFile)
