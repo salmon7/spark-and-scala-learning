@@ -22,7 +22,7 @@ object CalculateIncome {
         // with same key in different partitions, merge all value
         (income_month_1._1 + income_month_2._1, income_month_1._2 + income_month_2._2)
       }
-    ).map({ case (company, (total_income, month)) => (company, total_income, total_income / month) })
+    ).map({ case (company: String, (total_income: Double, month: Int)) => (company, total_income, total_income / month) })
 
     res.repartition(1).saveAsTextFile("file:///Users/gzzhangqilong2017/Workspace/github/spark-and-scala-learning/scala-learning/CalculateIncome/result")
   }
