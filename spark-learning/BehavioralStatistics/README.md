@@ -62,7 +62,7 @@ offset = 8252682, key = 757, value = 1575811082438      757     29
 
 - 在 BehavioralStatistics 目录编译，pkg clean install
 - 在修改`./run2_yarn_cluster.sh`的master地址后，直接运行
-- 在yarn中web端中，默认地址为http://localhost:8088，查看提交的程序，如果containter的stderr日志没报错，则执行成功
+- 在yarn中web端中，默认地址为`http://localhost:8088`，查看提交的程序，如果containter的stderr日志没报错，则执行成功
 - 观察非Application Master的container stdout输出，会定时从kafka读取统计数据并维护一定时间内的用户点击记录。
 - 由于进行了checkpoint，如果不需要以前的checkpoint数据，可以删除hdfs上的数据，如：`hadoop fs -rm -r -f /user/gzzhangqilong2017/BehavioralStatistics/tmp`。如果需要退出yarn cluster的application，则执行`yarn application -kill ${application}`
 - 以下是正常运行时的部分截图：
