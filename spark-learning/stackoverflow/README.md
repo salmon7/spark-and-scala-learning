@@ -1,82 +1,45 @@
-package stackoverflow
+# stackoverflow kmeans聚类分析
 
-import org.apache.spark.SparkConf
-import org.apache.spark.SparkContext
-import org.apache.spark.SparkContext._
-import org.apache.spark.rdd.RDD
-import annotation.tailrec
-import scala.reflect.ClassTag
+根据答案得分将StackOverflow上的帖子针对不同的编程语言进行kmeans聚类。
 
-/** A raw stackoverflow posting, either a question or an answer */
-case class Posting(postingType: Int, id: Int, acceptedAnswer: Option[Int], parentId: Option[QID], score: Int, tags: Option[String]) extends Serializable
+## 数据来源
+> 数据来源于coursera
 
+文本集在 `src/main/resources/stackoverflow/stackoverflow.csv` 中，包含有关StackOverflow帖子的信息，共有8143801个问题或者回答。提供的文本文件中的每一行具有以下格式：
 
-/** The main class */
-object StackOverflow extends StackOverflow {
+```
+<postTypeId>,<id>,[<acceptedAnswer>],[<parentId>],<score>,[<tag>]
+```
 
-  @transient lazy val conf: SparkConf = new SparkConf().setMaster("local").setAppName("StackOverflow")
-  @transient lazy val sc: SparkContext = new SparkContext(conf)
+以下是逗号分隔字段的简短说明。
 
-  /** Main function */
-  def main(args: Array[String]): Unit = {
+```
+<postTypeId>:     Type of the post. Type 1 = question, 
+                  type 2 = answer.
+                  
+<id>:             Unique id of the post (regardless of type).
 
-    val lines = sc.textFile("src/main/resources/stackoverflow/stackoverflow.csv")
-    val raw = rawPostings(lines)
-    val grouped = groupedPostings(raw)
-    val scored = scoredPostings(grouped)
-    val vectors = vectorPostings(scored)
-    // vectors.take(100).foreach(println)
-    // assert(vectors.count() == 2121822, "Incorrect number of vectors: " + vectors.count())
+<acceptedAnswer>: Id of the accepted answer post. This
+                  information is optional, so maybe be missing 
+                  indicated by an empty string.
+                  
+<parentId>:       For an answer: id of the corresponding 
+                  question. For a question:missing, indicated
+                  by an empty string.
+                  
+<score>:          The StackOverflow score (based on user 
+                  votes).
+                  
+<tag>:            The tag indicates the programming language 
+                  that the post is about, in case it's a 
+                  question, or missing in 
+```
+
+## 特征向量的计算
 
-    val means = kmeans(sampleVectors(vectors), vectors, debug = true)
-    val results = clusterResults(means, vectors)
-    printResults(results)
-  }
-}
+1.对每个question，根据id找出其对应的answer，key为question的id，value为 question-answer 元组的集合，命名为grouped。
 
-/** The parsing and kmeans methods */
-class StackOverflow extends StackOverflowInterface with Serializable {
-
-  /** Languages */
-  val langs =
-    List(
-      "JavaScript", "Java", "PHP", "Python", "C#", "C++", "Ruby", "CSS",
-      "Objective-C", "Perl", "Scala", "Haskell", "MATLAB", "Clojure", "Groovy")
-
-  /** K-means parameter: How "far apart" languages should be for the kmeans algorithm? */
-  def langSpread = 50000
-
-  assert(langSpread > 0, "If langSpread is zero we can't recover the language from the input data!")
-
-  /** K-means parameter: Number of clusters */
-  def kmeansKernels = 45
-
-  /** K-means parameter: Convergence criteria */
-  def kmeansEta: Double = 20.0D
-
-  /** K-means parameter: Maximum iterations */
-  def kmeansMaxIterations = 120
-
-
-  //
-  //
-  // Parsing utilities:
-  //
-  //
-
-  /** Load postings from the given file */
-  def rawPostings(lines: RDD[String]): RDD[Posting] =
-    lines.map(line => {
-      val arr = line.split(",")
-      Posting(postingType = arr(0).toInt,
-        id = arr(1).toInt,
-        acceptedAnswer = if (arr(2) == "") None else Some(arr(2).toInt),
-        parentId = if (arr(3) == "") None else Some(arr(3).toInt),
-        score = arr(4).toInt,
-        tags = if (arr.length >= 6) Some(arr(5).intern()) else None)
-    })
-
-
+```scala
   /** Group the questions and answers together */
   def groupedPostings(postings: RDD[Posting]): RDD[(QID, Iterable[(Question, Answer)])] = {
 
@@ -99,8 +62,11 @@ class StackOverflow extends StackOverflowInterface with Serializable {
       .join(ans)
       .groupByKey()
   }
+```
 
+2.在grouped中，对每个question找出所有answer中的最大分值，结果命名为scored，其key为Question，value为HighScore。所以我们的特征向量针对的的是question以及其所有answer中最大的一个。
 
+```scala
   /** Compute the maximum score for each posting */
   def scoredPostings(grouped: RDD[(QID, Iterable[(Question, Answer)])]): RDD[(Question, HighScore)] = {
 
@@ -133,8 +99,11 @@ class StackOverflow extends StackOverflowInterface with Serializable {
         (record._1, answerHighScore(record._2))
       })
   }
+```
 
+3.继续构造特征向量。对编程语言进行编号，并且扩大不同语言的差异，尽量使kmeans的聚类出来的每个簇中只包含一种语言，所以对编程语言的乘以一个系数langSpread（默认为50000），即跨语言对数据进行分区，然后根据分数进行聚类。在此特征向量vectors构造完成，由于kmeans需要多次迭代vectors，所以对其进行cache。
 
+```scala
   /** Compute the vectors for the kmeans */
   def vectorPostings(scored: RDD[(Question, HighScore)]): RDD[(LangIndex, HighScore)] = {
     /** Return optional index of first language that occurs in `tags`. */
@@ -157,57 +126,17 @@ class StackOverflow extends StackOverflowInterface with Serializable {
     })
       .cache()
   }
+```
 
+## kmeans聚类
 
-  /** Sample the vectors */
-  def sampleVectors(vectors: RDD[(LangIndex, HighScore)]): Array[(Int, Int)] = {
+1.在kmeans迭代中，最重要的是两点，一是计算各个特征向量vector距离means的距离并归为其最近中心的类，二是重新计算簇中心。
 
-    assert(kmeansKernels % langs.length == 0, "kmeansKernels should be a multiple of the number of languages studied.")
-    val perLang = kmeansKernels / langs.length
+- 其中findClosest计算一个特征向量计算所有means的距离并找出其归属的类。
+- 在for循环中针对所有的簇中心，计算第idx个簇的中心值为该簇所有向量的平均值作为新的簇中心；如果没有属于该簇的特征向量，则保持原来的簇中心不变。
+- 根据新旧中心的欧氏距离进行判断是否收敛。如果没有收敛，则再次进行迭代。如果收敛，则聚类结束。
 
-    // http://en.wikipedia.org/wiki/Reservoir_sampling
-    def reservoirSampling(lang: Int, iter: Iterator[Int], size: Int): Array[Int] = {
-      val res = new Array[Int](size)
-      val rnd = new util.Random(lang)
-
-      for (i <- 0 until size) {
-        assert(iter.hasNext, s"iterator must have at least $size elements")
-        res(i) = iter.next
-      }
-
-      var i = size.toLong
-      while (iter.hasNext) {
-        val elt = iter.next
-        val j = math.abs(rnd.nextLong) % i
-        if (j < size)
-          res(j.toInt) = elt
-        i += 1
-      }
-
-      res
-    }
-
-    val res =
-      if (langSpread < 500)
-      // sample the space regardless of the language
-        vectors.takeSample(false, kmeansKernels, 42)
-      else
-      // sample the space uniformly from each language partition
-        vectors.groupByKey.flatMap({
-          case (lang, vectors) => reservoirSampling(lang, vectors.toIterator, perLang).map((lang, _))
-        }).collect()
-
-    assert(res.length == kmeansKernels, res.length)
-    res
-  }
-
-
-  //
-  //
-  //  Kmeans method:
-  //
-  //
-
+```scala
   /** Main kmeans computation */
   @tailrec final def kmeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)], iter: Int = 1, debug: Boolean = false): Array[(Int, Int)] = {
     // val newMeans = means.clone() // you need to compute newMeans
@@ -227,7 +156,6 @@ class StackOverflow extends StackOverflowInterface with Serializable {
       }
     }
 
-    // TODO: Fill in the newMeans array
     val distance = euclideanDistance(means, newMeans)
 
     if (debug) {
@@ -252,142 +180,11 @@ class StackOverflow extends StackOverflowInterface with Serializable {
       newMeans
     }
   }
+```
 
+以下是收敛时最后一次迭代的日志输出：
 
-  //
-  //
-  //  Kmeans utilities:
-  //
-  //
-
-  /** Decide whether the kmeans clustering converged */
-  def converged(distance: Double) =
-    distance < kmeansEta
-
-
-  /** Return the euclidean distance between two points */
-  def euclideanDistance(v1: (Int, Int), v2: (Int, Int)): Double = {
-    val part1 = (v1._1 - v2._1).toDouble * (v1._1 - v2._1)
-    val part2 = (v1._2 - v2._2).toDouble * (v1._2 - v2._2)
-    part1 + part2
-  }
-
-  /** Return the euclidean distance between two points */
-  def euclideanDistance(a1: Array[(Int, Int)], a2: Array[(Int, Int)]): Double = {
-    assert(a1.length == a2.length)
-    var sum = 0d
-    var idx = 0
-    while (idx < a1.length) {
-      sum += euclideanDistance(a1(idx), a2(idx))
-      idx += 1
-    }
-    sum
-  }
-
-  /** Return the closest point */
-  def findClosest(p: (Int, Int), centers: Array[(Int, Int)]): Int = {
-    var bestIndex = 0
-    var closest = Double.PositiveInfinity
-    for (i <- 0 until centers.length) {
-      val tempDist = euclideanDistance(p, centers(i))
-      if (tempDist < closest) {
-        closest = tempDist
-        bestIndex = i
-      }
-    }
-    bestIndex
-  }
-
-
-  /** Average the vectors */
-  def averageVectors(ps: Iterable[(Int, Int)]): (Int, Int) = {
-    val iter = ps.iterator
-    var count = 0
-    var comp1: Long = 0
-    var comp2: Long = 0
-    while (iter.hasNext) {
-      val item = iter.next
-      comp1 += item._1
-      comp2 += item._2
-      count += 1
-    }
-    ((comp1 / count).toInt, (comp2 / count).toInt)
-  }
-
-
-  //
-  //
-  //  Displaying results:
-  //
-  //
-  def clusterResults(means: Array[(Int, Int)], vectors: RDD[(LangIndex, HighScore)]): Array[(String, Double, Int, Int)] = {
-    val closest = vectors.map(p => (findClosest(p, means), p))
-    val closestGrouped = closest.groupByKey()
-
-    val median = closestGrouped.mapValues { vs =>
-      val langLabel: String = // most common language in the cluster
-        langs(calculateCommon(vs) / langSpread)
-      val langPercent: Double = // percent of the questions in the most common language
-        vs.map(record => {
-          if (langLabel.equals(langs(record._1 / langSpread))) {
-            1
-          } else {
-            0
-          }
-        }).sum * 100.0 / vs.size
-      val clusterSize: Int = vs.size
-
-      var medianScore: Int = 0
-      val temp = vs.toArray.sortWith((x, y) => x._2.compareTo(y._2) < 0)
-      if (vs.size % 2 == 0) {
-        medianScore = (temp(vs.size / 2 - 1)._2 + temp(vs.size / 2)._2) / 2
-      } else {
-        medianScore = temp(vs.size / 2)._2
-      }
-      // val medianScore: Int = (vs.size / 2)._2
-
-      (langLabel, langPercent, clusterSize, medianScore)
-    }
-
-    median.collect().map(_._2).sortBy(_._4)
-  }
-
-  def calculateCommon(ps: Iterable[(Int, Int)]): Int = {
-
-    import collection.mutable.Map
-    var langMap: Map[Int, Int] = Map()
-    val iter = ps.iterator
-    while (iter.hasNext) {
-      val item = iter.next
-      if (langMap.contains(item._1)) {
-        langMap(item._1) = langMap(item._1) + 1
-      } else {
-        langMap(item._1) = 1
-      }
-    }
-
-    var max = -1
-    var maxIndex = 0
-    for (record <- langMap) {
-      if (max < record._2) {
-        max = record._2
-        maxIndex = record._1
-      }
-    }
-    maxIndex
-  }
-
-  def printResults(results: Array[(String, Double, Int, Int)]): Unit = {
-    println("Resulting clusters:")
-    println("  Score  Dominant language (%percent)  Questions")
-    println("================================================")
-    for ((lang, percent, size, score) <- results)
-      println(f"${score}%7d  ${lang}%-17s (${percent}%-5.1f%%)      ${size}%7d")
-  }
-}
-
-/*
-output:
+```
 Iteration: 45
   * current distance: 5.0
   * desired distance: 20.0
@@ -438,8 +235,16 @@ Iteration: 45
              (700000,0) ==>           (700000,0)    distance:        0
             (700000,49) ==>          (700000,49)    distance:        0
 
+```
 
+2.最后，还希望输出各个簇的情况，包括
 
+- 最高答案分数的中位数
+- 簇中占主导地位的编程语言
+- 属于主要语言的答案的百分比
+- 簇的大小（以问题维度进行统计）
+
+```
 Resulting clusters:
   Score  Dominant language (%percent)  Questions
 ================================================
@@ -488,6 +293,27 @@ Resulting clusters:
    1602  Haskell           (100.0%)            2
    1895  JavaScript        (100.0%)           33
   14639  Java              (100.0%)            2
+```
 
+我们可以简单分析以上的聚类结果：
 
- */
+- 每个簇都只有一种编程语言
+- 无论是任何语言，高分答案都偏少，大部分答案都是0~2分
+
+## 初始点的选择
+
+kmeans中簇的个数以及初始点的选择都会影响聚类的结果，本次的选择是针对每个编程语言选3个初始簇的中心，抽样方法选用的是水塘抽样（Reservoir sampling）。下面分析一下水塘抽样算法。
+
+假设数据原始集合很大为n，取k个样本，遍历集合n时的下标即为i：
+
+- 当i<=k时，前i个元素留下的概率为1
+- 当i=k+1时，取一个0~1的随机数，比较随机数和 k/(k+1) 的大小，如果随机数小于该值，则第i个需要随机取代原有的样本集中的一个。所以第i个元素留下的概率为 k/(k+1)。对于前k个元素j，其留下来的概率为上一轮中留下的概率乘以这一轮不被取代的概率，即 (k/k) * (1 - k/(k+1) * (1/k)) = k/(k+1)。
+- 当i=k+2时，取一个0~1的随机数，比较随机数和 k/(k+2) 的大小，如果随机数小于该值，则第i个需要随机取代原有的样本集中的一个。所以第i个元素留下的概率为 k/(k+2)。对于前k+1个元素j，其留下来的概率为上一轮中留下的概率乘以这一轮不被取代的概率，即 (k/(k+1)) * (1 - k/(k+2) * (1/k)) = k/(k+2)。
+- 假设i=m时，每个元素留下的概率均为 k/m。
+- 那么当i=m+1时，第i个元素的留下来的概率为 k/(m+1)，前i个元素留下的概率均为：k/m * (1 - k/(m+1) * 1/k) = k/(m+1)，上一轮留下的概率乘以不被替换的概率。
+- 综上可知，算法成立。以此类推，直到i遍历完了数据集，即i=n，则每个元素留下的概率均为 k/n 。
+
+## 参考
+
+[水塘抽样(Reservoir Sampling)问题](https://www.cnblogs.com/strugglion/p/6424874.html)  
+[Reservoir sampling](https://en.wikipedia.org/wiki/Reservoir_sampling)
