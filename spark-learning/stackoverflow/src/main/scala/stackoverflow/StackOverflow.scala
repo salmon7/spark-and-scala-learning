@@ -321,7 +321,9 @@ class StackOverflow extends StackOverflowInterface with Serializable {
   //
   //
   def clusterResults(means: Array[(Int, Int)], vectors: RDD[(LangIndex, HighScore)]): Array[(String, Double, Int, Int)] = {
+    // 找到所有向量所属的簇，RDD[(Int,(Int,Int))]，key为第n个簇，value表示特征向量
     val closest = vectors.map(p => (findClosest(p, means), p))
+    // 聚合同一个簇的所有向量，RDD[(Int,Iterator[(Int,Int)])]，key为第n个簇，value表示特征向量的可迭代容器
     val closestGrouped = closest.groupByKey()
 
     val median = closestGrouped.mapValues { vs =>
